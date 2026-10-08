@@ -3,11 +3,16 @@
 Wattle Labs Ansible-Pull Bootstrap. Provisions minimal base config so that an Ansible controller node can
 deploy playbooks.
 
+Supported targets: Debian and Ubuntu (the play asserts this).
+
 Implemented:
 
-- Install base packages and set the system timezone.
+- Install base packages.
+- Set the system timezone (`/etc/localtime` and `/etc/timezone`).
+- Generate and set the system default locale (`/etc/locale.gen`, `/etc/default/locale`).
 - Create the `svc_ansible` service account with a locked password, and deploy the controller's public key to it.
 - Add a sudoers drop-in scoped to the service account in /etc/sudoers.d/, validated with `visudo -cf`.
+- Enable UFW: deny inbound by default, allow SSH only from `ssh_allowed_cidrs`.
 - Ensure the SSH service is enabled and running.
 
 Planned:
@@ -30,8 +35,23 @@ All variables live in `vars/main.yml`.
 | `grant_sudo` | Whether the service account gets passwordless sudo |
 | `sudoers_dropin_path` | Path of the sudoers drop-in |
 | `base_packages` | Packages installed and kept at latest on every run |
-| `ssh_service_name` | `ssh` on Debian/Ubuntu, `sshd` on RHEL |
-| `system_timezone` | IANA timezone name |
+| `ssh_service_name` | SSH service unit name (`ssh` on Debian/Ubuntu) |
+| `system_timezone` | IANA timezone name, e.g. `Pacific/Auckland` |
+| `system_locale` | Default locale, e.g. `en_NZ.UTF-8` |
+| `ssh_port` | Port the UFW SSH rules apply to |
+| `ssh_allowed_cidrs` | Networks allowed to reach SSH. Authoritative: other allow rules for `ssh_port` are removed |
+
+
+### Firewall behaviour
+
+- Allow rules are added before UFW is enabled, so SSH from the permitted networks is never interrupted.
+- Any other UFW allow rule for `ssh_port` (e.g. `allow 22/tcp`, `allow OpenSSH`, or a network
+  removed from `ssh_allowed_cidrs`) is deleted. Allow rules for other ports are left alone.
+- Lockout risk: if you run the bootstrap over SSH from a network not in `ssh_allowed_cidrs`,
+  your next connection will be refused. Make sure the controller's IP (and `controller_from`)
+  falls inside one of the permitted networks.
+- Rules are IPv4 only if the CIDRs are IPv4. Inbound IPv6 SSH is denied by the default policy.
+- `--check` skips the `ufw` and `locale-gen` commands, so check mode does not preview those changes.
 
 
 ### Security model
@@ -53,7 +73,7 @@ Packages:
 
 SSH private key (repo deploy key):
 
-- `git-ansible-bootstrap` repo key copied from 1Password to `/root/.ssh/github-ansible-bootstrap` (mode 0600)
+- 'git-ansible-bootstrap' repo key copied from 1Password to `/root/.ssh/github-ansible-bootstrap` (mode 0600)
 
 SSH config:
 
