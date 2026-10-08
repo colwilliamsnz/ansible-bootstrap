@@ -9,6 +9,12 @@
 
   pre_tasks:
 
+    - name: Fail fast on unsupported OS
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This bootstrap supports Debian/Ubuntu only (found {{ ansible_os_family }})."
+
     - name: Fail fast if the controller public key is missing or malformed
       ansible.builtin.assert:
         that:
@@ -17,19 +23,99 @@
           - "'...' not in controller_pubkey"
         fail_msg: "controller_pubkey in vars/main.yml is unset or still the placeholder."
 
+    - name: Fail fast if no SSH source networks are defined (would lock out SSH)
+      ansible.builtin.assert:
+        that:
+          - ssh_allowed_cidrs | length > 0
+        fail_msg: "ssh_allowed_cidrs in vars/main.yml must contain at least one network."
+
+  handlers:
+
+    - name: Reload ufw
+      ansible.builtin.command: ufw reload
+      changed_when: true
+
   tasks:
+
+    # ---------- Packages ----------
+
+    - name: Install bootstrap prerequisites
+      ansible.builtin.package:
+        name:
+          - tzdata
+          - locales
+          - ufw
+        state: present
 
     - name: Install base packages and keep them updated
       ansible.builtin.package:
         name: "{{ base_packages }}"
         state: latest
 
-    - name: Set the system timezone
+    # ---------- Timezone ----------
+
+    - name: Check the timezone exists in zoneinfo
+      ansible.builtin.stat:
+        path: "/usr/share/zoneinfo/{{ system_timezone }}"
+      register: tz_zoneinfo
+
+    - name: Fail if the timezone name is invalid
+      ansible.builtin.assert:
+        that:
+          - tz_zoneinfo.stat.exists
+        fail_msg: "system_timezone '{{ system_timezone }}' not found in /usr/share/zoneinfo."
+
+    - name: Point /etc/localtime at the timezone
       ansible.builtin.file:
         src: "/usr/share/zoneinfo/{{ system_timezone }}"
         dest: /etc/localtime
         state: link
         force: true
+
+    - name: Keep /etc/timezone in sync
+      ansible.builtin.copy:
+        content: "{{ system_timezone }}\n"
+        dest: /etc/timezone
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ---------- Locale ----------
+
+    - name: Enable the locale in /etc/locale.gen
+      ansible.builtin.lineinfile:
+        path: /etc/locale.gen
+        regexp: "^#?\\s*{{ system_locale | regex_escape }}\\s"
+        line: "{{ system_locale }} {{ system_locale.split('.')[1] }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: List generated locales
+      ansible.builtin.command: locale -a
+      register: locales_generated
+      changed_when: false
+      check_mode: false
+
+    - name: Generate the locale
+      ansible.builtin.command: locale-gen
+      changed_when: true
+      when: >-
+        (system_locale | lower | replace('-', ''))
+        not in (locales_generated.stdout_lines | map('lower') | list)
+
+    - name: Set the system default locale
+      ansible.builtin.lineinfile:
+        path: /etc/default/locale
+        regexp: "^LANG="
+        line: "LANG={{ system_locale }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ---------- Service account ----------
 
     - name: Create the Ansible service account (locked password, key-only)
       ansible.builtin.user:
@@ -76,6 +162,67 @@
         path: "{{ sudoers_dropin_path }}"
         state: absent
       when: not (grant_sudo | bool)
+
+    # ---------- Firewall (UFW) ----------
+    # Order matters: allow rules are added before UFW is enabled, so SSH from
+    # ssh_allowed_cidrs is never cut off.
+
+    - name: Read current UFW rules
+      ansible.builtin.command: ufw show added
+      register: ufw_added
+      changed_when: false
+      check_mode: false
+
+    - name: Read UFW status
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      check_mode: false
+
+    - name: Allow SSH from each permitted network
+      ansible.builtin.command: >-
+        ufw allow from {{ item }} to any port {{ ssh_port }} proto tcp comment 'bootstrap-ssh'
+      loop: "{{ ssh_allowed_cidrs }}"
+      when: "('ufw allow from ' ~ item ~ ' to any port ' ~ ssh_port ~ ' proto tcp') not in ufw_added.stdout"
+      changed_when: true
+
+    - name: Remove SSH rules for networks no longer in ssh_allowed_cidrs
+      ansible.builtin.command: >-
+        ufw delete allow from {{ item }} to any port {{ ssh_port }} proto tcp
+      loop: >-
+        {{ ufw_added.stdout
+           | regex_findall('ufw allow from (\S+) to any port ' ~ ssh_port ~ ' proto tcp')
+           | difference(ssh_allowed_cidrs) }}
+      changed_when: true
+
+    - name: Remove unrestricted SSH rules (e.g. "allow 22/tcp" or "allow OpenSSH")
+      ansible.builtin.command: "ufw delete allow {{ item }}"
+      loop: >-
+        {{ ufw_added.stdout
+           | regex_findall('(?m)^ufw allow (' ~ ssh_port ~ '(?:/tcp)?|OpenSSH|ssh)(?:\s+comment.*)?$')
+           | unique }}
+      changed_when: true
+
+    - name: Default deny inbound
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: "^DEFAULT_INPUT_POLICY="
+        line: 'DEFAULT_INPUT_POLICY="DROP"'
+      notify: Reload ufw
+
+    - name: Default allow outbound
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: "^DEFAULT_OUTPUT_POLICY="
+        line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"'
+      notify: Reload ufw
+
+    - name: Enable UFW
+      ansible.builtin.command: ufw --force enable
+      when: "'Status: inactive' in ufw_status.stdout"
+      changed_when: true
+
+    # ---------- Services ----------
 
     - name: Ensure the SSH service is enabled and running
       ansible.builtin.service:
