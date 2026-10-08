@@ -1,22 +1,27 @@
 ---
 
+# Time and locale
+system_timezone: Pacific/Auckland
+system_locale: en_NZ.UTF-8
+
 # Service account the Ansible controller connects as
 ansible_svc_user: svc_ansible
 ansible_svc_home: "/home/{{ ansible_svc_user }}"
 ansible_svc_shell: /bin/bash
 
-system_timezone: Pacific/Auckland
-
 # Controller public key (not a secret, but repo integrity matters: see README)
 controller_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAXfg6TuKUUg2xoXWjl3bAeleXKLffnUs9pYX9buq6FQ Wattle-Ansible"
 
 # Optional: restrict the key to the controller's source IP(s), comma separated.
-# Leave empty for no restriction.
+# Must fall inside ssh_allowed_cidrs. Leave empty for no restriction.
 controller_from: "10.10.2.31"
 
 # Passwordless sudo for the service account only
 grant_sudo: true
 sudoers_dropin_path: /etc/sudoers.d/99-ansible
+
+# Service that must be enabled and running ("ssh" on Debian/Ubuntu)
+ssh_service_name: ssh
 
 # Base packages installed and kept current on every run
 base_packages:
@@ -24,5 +29,8 @@ base_packages:
   - tmux
   - wget
 
-# Service that must be enabled and running ("ssh" on Debian/Ubuntu, "sshd" on RHEL)
-ssh_service_name: ssh
+# UFW: SSH is only reachable from these networks. All other inbound traffic is denied.
+# Any other UFW allow rule for ssh_port is removed, so this list is authoritative.
+ssh_port: 22
+ssh_allowed_cidrs:
+  - 10.10.20.0/24
