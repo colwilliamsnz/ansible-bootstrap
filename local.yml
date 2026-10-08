@@ -7,39 +7,78 @@
   vars_files:
     - vars/main.yml
 
+  pre_tasks:
+
+    - name: Fail fast if the controller public key is missing or malformed
+      ansible.builtin.assert:
+        that:
+          - controller_pubkey is match('^(ssh-|ecdsa-|sk-)')
+          - controller_pubkey.split() | length >= 2
+          - "'...' not in controller_pubkey"
+        fail_msg: "controller_pubkey in vars/main.yml is unset or still the placeholder."
+
   tasks:
 
-   - name: Install packages and keep them updated
-     ansible.builtin.package:
-       name: "{{ packages }}"
-       state: latest
+    - name: Install base packages and keep them updated
+      ansible.builtin.package:
+        name: "{{ base_packages }}"
+        state: latest
 
-   - name: Set the system timezone
-     ansible.builtin.file:
-       src: "/usr/share/zoneinfo/{{ system_timezone }}"
-       dest: /etc/localtime
-       state: link
-       force: true
+    - name: Set the system timezone
+      ansible.builtin.file:
+        src: "/usr/share/zoneinfo/{{ system_timezone }}"
+        dest: /etc/localtime
+        state: link
+        force: true
 
-   - name: Create the ansible service account user
-     ansible.builtin.user:
-       name: "{{ admin_user }}"
-       groups: "{{ admin_group }}"
-       append: true
-       shell: /bin/bash
-       create_home: true
+    - name: Create the Ansible service account (locked password, key-only)
+      ansible.builtin.user:
+        name: "{{ ansible_svc_user }}"
+        home: "{{ ansible_svc_home }}"
+        shell: "{{ ansible_svc_shell }}"
+        create_home: true
+        password: "!"
+        update_password: on_create
 
-   - name: Allow the admin group access to sudo without a password
-     ansible.builtin.copy:
-       content: "%{{ admin_group }} ALL=(ALL) NOPASSWD: ALL\n"
-       dest: /etc/sudoers.d/99-ansible
-       owner: root
-       group: root
-       mode: "0440"
-       validate: "visudo -cf %s"
+    - name: Ensure the service account .ssh directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_svc_home }}/.ssh"
+        state: directory
+        owner: "{{ ansible_svc_user }}"
+        group: "{{ ansible_svc_user }}"
+        mode: "0700"
 
-   - name: Make sure a service is enabled and running
-     ansible.builtin.service:
-       name: "{{ managed_service }}"
-       state: started
-       enabled: true
+    - name: Install the controller public key
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_svc_home }}/.ssh/authorized_keys"
+        create: true
+        owner: "{{ ansible_svc_user }}"
+        group: "{{ ansible_svc_user }}"
+        mode: "0600"
+        line: >-
+          {{ ('from="' ~ controller_from ~ '" ') if controller_from | length > 0 else '' }}{{ controller_pubkey }}
+        # Match on the key body so changing controller_from replaces the line rather than duplicating it
+        regexp: "{{ controller_pubkey.split()[1] | regex_escape }}"
+        state: present
+
+    - name: Allow the service account passwordless sudo
+      ansible.builtin.copy:
+        content: "{{ ansible_svc_user }} ALL=(ALL) NOPASSWD: ALL\n"
+        dest: "{{ sudoers_dropin_path }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+      when: grant_sudo | bool
+
+    - name: Remove the sudoers drop-in when sudo is not granted
+      ansible.builtin.file:
+        path: "{{ sudoers_dropin_path }}"
+        state: absent
+      when: not (grant_sudo | bool)
+
+    - name: Ensure the SSH service is enabled and running
+      ansible.builtin.service:
+        name: "{{ ssh_service_name }}"
+        state: started
+        enabled: true
