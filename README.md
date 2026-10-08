@@ -53,7 +53,7 @@ Packages:
 
 SSH private key (repo deploy key):
 
-- 'git-ansible-bootstrap' repo key copied from 1Password to `/root/.ssh/github-ansible-bootstrap` (mode 0600)
+- `git-ansible-bootstrap` repo key copied from 1Password to `/root/.ssh/github-ansible-bootstrap` (mode 0600)
 
 SSH config:
 
