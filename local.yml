@@ -1,6 +1,6 @@
 ---
 
-- name: Basic System Setup for later Ansible Playbooks
+- name: Wattle Labs Ansible-Pull Bootstrap
   hosts: localhost
   connection: local
   become: true
