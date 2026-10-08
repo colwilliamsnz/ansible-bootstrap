@@ -1,0 +1,16 @@
+---
+
+admin_user: svc_ansible
+
+admin_group: sudo
+
+ansible_pull_repo: ""
+
+managed_service: ssh
+
+packages:
+  - curl
+  - tmux
+  - wget
+
+system_timezone: Pacific/Auckland
