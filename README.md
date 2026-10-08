@@ -1,5 +1,12 @@
 # Ansible Bootstrap
-Wattle Labs Ansible-Pull Bootstrap. Provisions base required config so that Ansible playbooks can target the system from a controller node.
+Wattle Labs Ansible-Pull Bootstrap. Provisions minimal base config so that an Ansible controller node can
+deploy playbooks.
+
+- Create an ansible service account with a locked password, and deploy the controller's public key to it.
+- Add a scoped sudoers drop-in in /etc/sudoers.d/, validated with visudo -cf.
+- Make sure python3 and any modules your roles assume (e.g. python3-apt) are present.
+- Set the hostname/FQDN, DNS resolvers and chrony NTP.
+
 
 
 ### Pre-reqs on target server:
@@ -32,16 +39,16 @@ Host github-ansible-bootstrap
 git clone git@github-ansible-bootstrap:colwilliamsnz/ansible-bootstrap.git
 ```
 
+### Run using ansible-pull:
+
+```
+ansible-pull -U https://git.example/bootstrap.git \
+    -e "bootstrap_hostname=svr-vm-newhost bootstrap_domain=wattle.nz" \
+    bootstrap.yml
+```
 
 ### Run the playbook manually:
 
 ```bash
-sudo ansible-playbook -i "localhost," -c local local.yml
-```
-
-
-### Run using ansible-pull:
-
-```
-# todo
+sudo ansible-playbook -i "localhost," -c local bootstrap.yml
 ```
