@@ -1,16 +1,28 @@
 ---
 
-admin_user: svc_ansible
+# Service account the Ansible controller connects as
+ansible_svc_user: svc_ansible
+ansible_svc_home: "/home/{{ ansible_svc_user }}"
+ansible_svc_shell: /bin/bash
 
-admin_group: sudo
+system_timezone: Pacific/Auckland
 
-ansible_pull_repo: ""
+# Controller public key (not a secret, but repo integrity matters: see README)
+controller_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAXfg6TuKUUg2xoXWjl3bAeleXKLffnUs9pYX9buq6FQ Wattle-Ansible"
 
-managed_service: ssh
+# Optional: restrict the key to the controller's source IP(s), comma separated.
+# Leave empty for no restriction.
+controller_from: "10.10.2.31"
 
-packages:
+# Passwordless sudo for the service account only
+grant_sudo: true
+sudoers_dropin_path: /etc/sudoers.d/99-ansible
+
+# Base packages installed and kept current on every run
+base_packages:
   - curl
   - tmux
   - wget
 
-system_timezone: Pacific/Auckland
+# Service that must be enabled and running ("ssh" on Debian/Ubuntu, "sshd" on RHEL)
+ssh_service_name: ssh
