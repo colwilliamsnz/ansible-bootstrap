@@ -33,4 +33,4 @@ base_packages:
 # Any other UFW allow rule for ssh_port is removed, so this list is authoritative.
 ssh_port: 22
 ssh_allowed_cidrs:
-  - 10.10.20.0/24
+  - 10.10.2.0/24
