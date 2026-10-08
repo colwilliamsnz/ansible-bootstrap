@@ -1,12 +1,36 @@
 # Ansible Bootstrap
-Wattle Labs Ansible-pull Bootstrap for provisioning required config so that Ansible playbooks can target the system.
+Wattle Labs Ansible-Pull Bootstrap. Provisions base required config so that Ansible playbooks can target the system from a controller node.
 
-Required packages on target server:
 
-git
-ansible-core
+### Pre-reqs on target server:
 
-private key: git-ansible-bootstrap
+Packages:
+
+- git
+- ansible-core
+
+SSH private key:
+
+- 'git-ansible-bootstrap' repo key copied from 1Password to ~/ssh/github-ansible-bootstrap
+
+SSH config:
+
+Append the following to ~/.ssh/config
+
+```ini
+Host github-ansible-bootstrap
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/github-ansible-bootstrap
+  IdentitiesOnly yes
+```
+
+
+### Clone the repo:
+
+```bash
+git clone git@github-ansible-bootstrap:colwilliamsnz/ansible-bootstrap.git
+```
 
 
 ### Run the playbook manually:
