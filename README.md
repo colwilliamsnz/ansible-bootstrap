@@ -106,3 +106,19 @@ sudo ansible-pull \
 ```bash
 sudo ansible-playbook -i "localhost," -c local local.yml
 ```
+
+### Trust the target server host key:
+
+Add the target server’s public host key on the Ansible control node, so the control node can verify later automated SSH connections
+
+From the control node:
+
+```
+ssh-keyscan -H -t ed25519 target.example.com >> ~/.ssh/known_hosts
+```
+
+To trust every host in your inventory:
+
+```
+ansible all -i inventory.ini --list-hosts | tail -n +2 | xargs -I{} ssh-keyscan -H -t ed25519 {} >> ~/.ssh/known_hosts
+```
