@@ -25,6 +25,9 @@ ssh_service_name: ssh
 
 # Base packages installed and kept current on every run
 base_packages:
+  - openssh-server
+  - iputils-ping
+  - nano
   - curl
   - tmux
   - wget
