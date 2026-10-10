@@ -12,8 +12,8 @@
     - name: Fail fast on unsupported OS
       ansible.builtin.assert:
         that:
-          - ansible_os_family == 'Debian'
-        fail_msg: "This bootstrap supports Debian/Ubuntu only (found {{ ansible_os_family }})."
+          - ansible_facts['os_family'] == 'Debian'
+        fail_msg: "This bootstrap supports Debian/Ubuntu only (found {{ ansible_facts['os_family'] }})."
 
     - name: Fail fast if the controller public key is missing or malformed
       ansible.builtin.assert:
@@ -28,12 +28,6 @@
         that:
           - ssh_allowed_cidrs | length > 0
         fail_msg: "ssh_allowed_cidrs in vars/main.yml must contain at least one network."
-
-    - name: Fail fast if ssh_rule_action is not allow or limit
-      ansible.builtin.assert:
-        that:
-          - ssh_rule_action in ['allow', 'limit']
-        fail_msg: "ssh_rule_action in vars/main.yml must be 'allow' or 'limit' (found '{{ ssh_rule_action }}')."
 
   handlers:
 
@@ -178,9 +172,7 @@
     # ---------- Firewall (UFW) ----------
     # Order matters: SSH rules are reconciled before UFW is enabled, so SSH from
     # ssh_allowed_cidrs is never cut off. Managed rules take the form
-    # "<ssh_rule_action> from <cidr> to any port <ssh_port> proto tcp".
-    # Stale managed rules (wrong network or wrong action) are deleted before the
-    # desired ones are added, so switching allow <-> limit converts in place.
+    # "allow from <cidr> to any port <ssh_port> proto tcp".
 
     - name: Read current UFW rules
       ansible.builtin.command: ufw show added
@@ -198,16 +190,16 @@
       ansible.builtin.set_fact:
         ufw_ssh_desired: >-
           {{ ssh_allowed_cidrs
-             | map('regex_replace', '^', 'ufw ' ~ ssh_rule_action ~ ' from ')
+             | map('regex_replace', '^', 'ufw allow from ')
              | map('regex_replace', '$', ' to any port ' ~ ssh_port ~ ' proto tcp')
              | list }}
         ufw_ssh_managed: >-
           {{ ufw_added.stdout_lines
              | map('regex_replace', '\s+comment\s.*$', '')
-             | select('match', '^ufw (allow|limit) from \S+ to any port ' ~ ssh_port ~ ' proto tcp$')
+             | select('match', '^ufw allow from \S+ to any port ' ~ ssh_port ~ ' proto tcp$')
              | list }}
 
-    - name: Remove managed SSH rules that no longer match ssh_allowed_cidrs or ssh_rule_action
+    - name: Remove SSH rules for networks no longer in ssh_allowed_cidrs
       ansible.builtin.command: "ufw delete {{ item | regex_replace('^ufw ', '') }}"
       loop: "{{ ufw_ssh_managed | difference(ufw_ssh_desired) }}"
       changed_when: true
@@ -220,14 +212,14 @@
       loop: >-
         {{ ufw_added.stdout_lines
            | select('match', '^ufw (allow|limit)(\s|$)')
-           | reject('match', '^ufw (allow|limit) from \S+ to any port ' ~ ssh_port ~ ' proto tcp(\s|$)')
+           | reject('match', '^ufw allow from \S+ to any port ' ~ ssh_port ~ ' proto tcp(\s|$)')
            | select('search', '(^|\s)(' ~ ssh_port ~ '(/tcp)?|OpenSSH|ssh)(\s|$)')
            | map('regex_replace', '^ufw ', '')
            | map('regex_replace', '\s+comment\s.*$', '')
            | unique }}
       changed_when: true
 
-    - name: Add SSH rules for each permitted network
+    - name: Allow SSH from each permitted network
       ansible.builtin.command: "{{ item }} comment 'bootstrap-ssh'"
       loop: "{{ ufw_ssh_desired | difference(ufw_ssh_managed) }}"
       changed_when: true
