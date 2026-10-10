@@ -12,7 +12,7 @@ Supported targets: Debian and Ubuntu. The play asserts this and fails on anythin
 - Sets the system timezone (`/etc/localtime`, `/etc/timezone`).
 - Generates and sets the default locale (`/etc/locale.gen`, `/etc/default/locale`).
 - Creates the `svc_ansible` service account with a locked password and writes the controller's public key to its `authorized_keys`. The file is authoritative: any other key is removed.
-- Adds a sudoers drop-in for the service account in `/etc/sudoers.d/`, validated with `visudo -cf`.
+- Grants the service account passwordless sudo via a drop-in in `/etc/sudoers.d/`. See [Sudo access](#sudo-access).
 - Enables UFW: deny inbound by default, allow SSH only from `ssh_allowed_cidrs`. See [Firewall behaviour](#firewall-behaviour).
 - Ensures the SSH service is enabled and running.
 
@@ -24,21 +24,38 @@ Everything else is applied by the controller's playbooks after the bootstrap, in
 - SSH daemon hardening (password auth, root login).
 - Package upgrades.
 
+## Repo visibility: private or public
+
+The repo contains no secrets. The controller public key is public by nature, and everything else is configuration. The one thing it does reveal is internal network layout (`ssh_allowed_cidrs`, `controller_from`). Either visibility works; the choice changes the prerequisites and the run command.
+
+|                | Private repo                                             | Public repo                               |
+|----------------|----------------------------------------------------------|-------------------------------------------|
+| Transport      | SSH with a read-only deploy key                          | HTTPS, no credentials                     |
+| Target setup   | Deploy key from 1Password plus `/root/.ssh/config` entry | None beyond `git` and `ansible-core`      |
+| Exposes        | Nothing                                                  | Network layout in `vars/main.yml`         |
+| Integrity      | Branch protection, signed commits                        | Branch protection, signed commits (same)  |
+
+Repo integrity matters equally in both cases. See [Security model](#security-model).
+
 ## Prerequisites (target host)
 
-1. Install packages:
+### Both variants
 
-    ```bash
-    sudo apt update && sudo apt install git ansible-core
-    ```
+Install packages:
 
-2. Copy the repo deploy key `git-ansible-bootstrap` from 1Password to `/root/.ssh/git-ansible-bootstrap`, then set its mode:
+```bash
+sudo apt update && sudo apt install git ansible-core
+```
+
+### Private repo only
+
+1. Copy the repo deploy key `git-ansible-bootstrap` from 1Password to `/root/.ssh/git-ansible-bootstrap`, then set its mode:
 
     ```bash
     sudo chmod 0600 /root/.ssh/git-ansible-bootstrap
     ```
 
-3. ansible-pull runs as root, so append this to `/root/.ssh/config`:
+2. ansible-pull runs as root, so append this to `/root/.ssh/config`:
 
     ```ini
     Host git-ansible-bootstrap
@@ -47,6 +64,10 @@ Everything else is applied by the controller's playbooks after the bootstrap, in
       IdentityFile ~/.ssh/git-ansible-bootstrap
       IdentitiesOnly yes
     ```
+
+### Public repo only
+
+Nothing further. The host needs outbound HTTPS to `github.com`, which the bootstrap does not restrict (UFW default outbound policy is allow).
 
 ## Configure
 
@@ -73,7 +94,9 @@ All variables live in `vars/main.yml`. Review them before the first run. In part
 
 ## Run
 
-ansible-pull runs `local.yml` by default.
+ansible-pull runs `local.yml` by default. Pick the command that matches the repo visibility.
+
+### Private repo (SSH, deploy key)
 
 ```bash
 sudo ansible-pull \
@@ -83,6 +106,22 @@ sudo ansible-pull \
     --accept-host-key \
     --purge
 ```
+
+`--accept-host-key` adds GitHub's SSH host key to root's `known_hosts` on first contact. Without it the clone stops at the host key prompt.
+
+### Public repo (HTTPS)
+
+```bash
+sudo ansible-pull \
+    -U https://github.com/colwilliamsnz/ansible-bootstrap.git \
+    -C main \
+    -i localhost, \
+    --purge
+```
+
+No `--accept-host-key`: HTTPS verifies GitHub through the system CA bundle (`ca-certificates`), not `known_hosts`.
+
+### Common options
 
 `--purge` deletes the checkout (`/root/.ansible/pull/<hostname>`) after the run. The bootstrap is one-shot, so nothing needs it afterwards.
 
@@ -108,6 +147,36 @@ ansible all -i inventory.ini --list-hosts | tail -n +2 | xargs -I{} ssh-keyscan 
 
 `ssh-keyscan` trusts whatever key answers. Compare the fingerprint against the target's console output (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) before relying on it.
 
+## Sudo access
+
+The controller connects as `svc_ansible`, an unprivileged account. Almost everything a playbook does (install packages, write to `/etc`, manage services) needs root, which Ansible gets with `become: true`. On Debian/Ubuntu `become` runs `sudo` under the hood, and there is no one at the keyboard to type a password. The sudoers drop-in is what makes that work.
+
+The play writes one line to `/etc/sudoers.d/99-ansible`:
+
+```
+svc_ansible ALL=(ALL) NOPASSWD: ALL
+```
+
+Read left to right: on any host, `svc_ansible` may run any command as any user without a password.
+
+Why a drop-in rather than editing `/etc/sudoers`:
+
+- `/etc/sudoers` is owned by the distro package. Editing it invites merge conflicts on upgrade and makes the change hard to find later.
+- A drop-in is a single file with one owner and one purpose. Removing it (or setting `grant_sudo: false`) removes the grant cleanly.
+- The `99-` prefix sorts it after the distro's own drop-ins, so it is applied last.
+
+Why it is safe to write with Ansible:
+
+- The file is passed through `visudo -cf` before it is put in place. A syntax error in sudoers can lock everyone out of `sudo` on the host. `visudo -cf` rejects the file and the task fails instead.
+- Mode is `0440`, owner `root:root`. `sudo` ignores drop-ins with looser permissions.
+
+Why `NOPASSWD: ALL` and not a narrower command list:
+
+- Ansible modules run as arbitrary Python scripts in temp paths, so a command allow-list cannot be expressed meaningfully. Any attempt to restrict it would either break Ansible or be trivially bypassed.
+- The real boundary is who can authenticate as `svc_ansible`. That is controlled by the `authorized_keys` file (single key, `restrict`, `from=`) and UFW. See [Security model](#security-model).
+
+Set `grant_sudo: false` if the controller will only ever run tasks that do not need root on this host. The play then removes the drop-in if it exists.
+
 ## Firewall behaviour
 
 - Allow rules are added before UFW is enabled, so SSH from permitted networks is never interrupted.
@@ -119,11 +188,11 @@ ansible all -i inventory.ini --list-hosts | tail -n +2 | xargs -I{} ssh-keyscan 
 
 ## Security model
 
-The controller public key is not a secret. Repo integrity is what matters. Anyone who can push to the pulled branch decides which key is authorised, and so gets root on every host that pulls.
+The controller public key is not a secret. Repo integrity is what matters. Anyone who can push to the pulled branch decides which key is authorised, and so gets root on every host that pulls. This is true whether the repo is private or public: visibility controls who can read, not who can write.
 
 - Protect the branch and restrict push access.
 - Sign commits, and pull with `--verify-commit` once a signing key is in place on targets.
 - Set `controller_from` to the controller's IP.
 - Keep `controller_key_options` at `restrict` unless there is a reason not to.
 
-The repo is private and pulled with a read-only deploy key. Because nothing in it is secret, it could be public and pulled over HTTPS, which removes the deploy key and `/root/.ssh/config` steps. The trade-off is publishing the internal network layout (`ssh_allowed_cidrs`, `controller_from`).
+A private repo additionally hides the network layout in `vars/main.yml` from the public. A public repo removes the deploy key handling from every new host. Pick based on how much the CIDRs and controller IP matter to you; the play itself is the same either way.
