@@ -29,6 +29,12 @@
           - ssh_allowed_cidrs | length > 0
         fail_msg: "ssh_allowed_cidrs in vars/main.yml must contain at least one network."
 
+    - name: Fail fast if ssh_rule_action is not allow or limit
+      ansible.builtin.assert:
+        that:
+          - ssh_rule_action in ['allow', 'limit']
+        fail_msg: "ssh_rule_action in vars/main.yml must be 'allow' or 'limit' (found '{{ ssh_rule_action }}')."
+
   handlers:
 
     - name: Reload ufw
@@ -40,17 +46,19 @@
     # ---------- Packages ----------
 
     - name: Install bootstrap prerequisites
-      ansible.builtin.package:
+      ansible.builtin.apt:
         name:
           - tzdata
           - locales
           - ufw
         state: present
+        update_cache: true
+        cache_valid_time: 3600
 
-    - name: Install base packages and keep them updated
-      ansible.builtin.package:
+    - name: Install base packages
+      ansible.builtin.apt:
         name: "{{ base_packages }}"
-        state: latest
+        state: present
 
     # ---------- Timezone ----------
 
@@ -134,18 +142,22 @@
         group: "{{ ansible_svc_user }}"
         mode: "0700"
 
-    - name: Install the controller public key
-      ansible.builtin.lineinfile:
-        path: "{{ ansible_svc_home }}/.ssh/authorized_keys"
-        create: true
+    - name: Build the authorized_keys options string
+      ansible.builtin.set_fact:
+        controller_key_opts: >-
+          {{ ([controller_key_options]
+              + (['from="' ~ controller_from ~ '"'] if controller_from | length > 0 else []))
+             | select | join(',') }}
+
+    # The file is authoritative: only the controller key is present. Any other
+    # key for this account is removed.
+    - name: Install the controller public key (authoritative)
+      ansible.builtin.copy:
+        content: "{{ (controller_key_opts ~ ' ') if controller_key_opts | length > 0 else '' }}{{ controller_pubkey }}\n"
+        dest: "{{ ansible_svc_home }}/.ssh/authorized_keys"
         owner: "{{ ansible_svc_user }}"
         group: "{{ ansible_svc_user }}"
         mode: "0600"
-        line: >-
-          {{ ('from="' ~ controller_from ~ '" ') if controller_from | length > 0 else '' }}{{ controller_pubkey }}
-        # Match on the key body so changing controller_from replaces the line rather than duplicating it
-        regexp: "{{ controller_pubkey.split()[1] | regex_escape }}"
-        state: present
 
     - name: Allow the service account passwordless sudo
       ansible.builtin.copy:
@@ -164,8 +176,11 @@
       when: not (grant_sudo | bool)
 
     # ---------- Firewall (UFW) ----------
-    # Order matters: allow rules are added before UFW is enabled, so SSH from
-    # ssh_allowed_cidrs is never cut off.
+    # Order matters: SSH rules are reconciled before UFW is enabled, so SSH from
+    # ssh_allowed_cidrs is never cut off. Managed rules take the form
+    # "<ssh_rule_action> from <cidr> to any port <ssh_port> proto tcp".
+    # Stale managed rules (wrong network or wrong action) are deleted before the
+    # desired ones are added, so switching allow <-> limit converts in place.
 
     - name: Read current UFW rules
       ansible.builtin.command: ufw show added
@@ -179,28 +194,42 @@
       changed_when: false
       check_mode: false
 
-    - name: Allow SSH from each permitted network
-      ansible.builtin.command: >-
-        ufw allow from {{ item }} to any port {{ ssh_port }} proto tcp comment 'bootstrap-ssh'
-      loop: "{{ ssh_allowed_cidrs }}"
-      when: "('ufw allow from ' ~ item ~ ' to any port ' ~ ssh_port ~ ' proto tcp') not in ufw_added.stdout"
+    - name: Work out desired and existing managed SSH rules
+      ansible.builtin.set_fact:
+        ufw_ssh_desired: >-
+          {{ ssh_allowed_cidrs
+             | map('regex_replace', '^', 'ufw ' ~ ssh_rule_action ~ ' from ')
+             | map('regex_replace', '$', ' to any port ' ~ ssh_port ~ ' proto tcp')
+             | list }}
+        ufw_ssh_managed: >-
+          {{ ufw_added.stdout_lines
+             | map('regex_replace', '\s+comment\s.*$', '')
+             | select('match', '^ufw (allow|limit) from \S+ to any port ' ~ ssh_port ~ ' proto tcp$')
+             | list }}
+
+    - name: Remove managed SSH rules that no longer match ssh_allowed_cidrs or ssh_rule_action
+      ansible.builtin.command: "ufw delete {{ item | regex_replace('^ufw ', '') }}"
+      loop: "{{ ufw_ssh_managed | difference(ufw_ssh_desired) }}"
       changed_when: true
 
-    - name: Remove SSH rules for networks no longer in ssh_allowed_cidrs
-      ansible.builtin.command: >-
-        ufw delete allow from {{ item }} to any port {{ ssh_port }} proto tcp
+    # Any other allow or limit rule that mentions ssh_port (e.g. "allow 22/tcp",
+    # "limit 22/tcp", "allow OpenSSH", "allow from any to any port 22",
+    # "allow in on eth0 to any port 22") is deleted.
+    - name: Remove other SSH allow/limit rules
+      ansible.builtin.command: "ufw delete {{ item }}"
       loop: >-
-        {{ ufw_added.stdout
-           | regex_findall('ufw allow from (\S+) to any port ' ~ ssh_port ~ ' proto tcp')
-           | difference(ssh_allowed_cidrs) }}
-      changed_when: true
-
-    - name: Remove unrestricted SSH rules (e.g. "allow 22/tcp" or "allow OpenSSH")
-      ansible.builtin.command: "ufw delete allow {{ item }}"
-      loop: >-
-        {{ ufw_added.stdout
-           | regex_findall('(?m)^ufw allow (' ~ ssh_port ~ '(?:/tcp)?|OpenSSH|ssh)(?:\s+comment.*)?$')
+        {{ ufw_added.stdout_lines
+           | select('match', '^ufw (allow|limit)(\s|$)')
+           | reject('match', '^ufw (allow|limit) from \S+ to any port ' ~ ssh_port ~ ' proto tcp(\s|$)')
+           | select('search', '(^|\s)(' ~ ssh_port ~ '(/tcp)?|OpenSSH|ssh)(\s|$)')
+           | map('regex_replace', '^ufw ', '')
+           | map('regex_replace', '\s+comment\s.*$', '')
            | unique }}
+      changed_when: true
+
+    - name: Add SSH rules for each permitted network
+      ansible.builtin.command: "{{ item }} comment 'bootstrap-ssh'"
+      loop: "{{ ufw_ssh_desired | difference(ufw_ssh_managed) }}"
       changed_when: true
 
     - name: Default deny inbound
