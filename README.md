@@ -8,7 +8,7 @@ Supported targets: Debian and Ubuntu. The play asserts this and fails on anythin
 
 ## What it does
 
-- Installs base packages (`base_packages`). Packages are installed if missing, not upgraded. Patching is the controller's job.
+- Installs base packages (`base_packages`). Packages are installed if missing, not upgraded (patching is the controller's job). Note that a number of useful utilities are installed over and above what Ansible needs to run.
 - Sets the system timezone (`/etc/localtime`, `/etc/timezone`).
 - Generates and sets the default locale (`/etc/locale.gen`, `/etc/default/locale`).
 - Creates the `svc_ansible` service account with a locked password and writes the controller's public key to its `authorized_keys`. The file is authoritative: any other key is removed.
